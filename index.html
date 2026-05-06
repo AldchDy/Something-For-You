@@ -1199,38 +1199,77 @@ function updateDots() {
   }
 }
 
-function loadPhoto(idx) {
-  photoIdx = idx;
-  var src = 'foto' + (idx + 1) + '.png';
+/* ── Preload cache ── */
+var preloadCache = {};
+function preloadImage(idx) {
+  if (preloadCache[idx]) return;
+  var tmp = new Image();
+  tmp.onload  = function() { preloadCache[idx] = 'ok';  };
+  tmp.onerror = function() { preloadCache[idx] = 'err'; };
+  tmp.src = 'foto' + (idx + 1) + '.png';
+}
 
+/* ── Render photo content into card (no transition logic) ── */
+function setPhotoContent(idx) {
+  var src  = 'foto' + (idx + 1) + '.png';
+  var wrap = el('imgWrap');
+  var img  = el('photoImg');
+
+  /* Remove stale fallback */
+  var oldFb = wrap.querySelector('.photo-fallback');
+  if (oldFb) wrap.removeChild(oldFb);
+
+  /* Update HUD text */
   el('photoNum').textContent     = pad2(idx + 1);
   el('photoLabel').textContent   = pad2(idx + 1) + ' / 10';
   el('photoCaption').textContent = CAPTIONS[idx];
   el('photoBg').style.backgroundImage = 'url(' + src + ')';
-
-  /* Image */
-  var wrap = el('imgWrap');
-  var img  = el('photoImg');
-  var oldFb = wrap.querySelector('.photo-fallback');
-  if (oldFb) wrap.removeChild(oldFb);
-  img.style.display = 'block';
-  img.alt = 'Memory ' + (idx + 1);
-  img.src = src;
-
-  img.onerror = function() {
-    img.style.display = 'none';
-    if (!wrap.querySelector('.photo-fallback')) {
-      var fb = document.createElement('div');
-      fb.className = 'photo-fallback';
-      fb.style.background = GRADIENTS[idx % GRADIENTS.length];
-      fb.innerHTML = '<div class="fb-icon">📷</div><div class="fb-label">MEMORY #' + pad2(idx+1) + '</div>';
-      wrap.appendChild(fb);
-    }
-  };
-
   updateDots();
 
-  /* Show SURPRISE after user reaches photo 10 */
+  if (preloadCache[idx] === 'err') {
+    /* Fallback tile */
+    img.style.display = 'none';
+    img.src = '';
+    var fb = document.createElement('div');
+    fb.className = 'photo-fallback';
+    fb.style.background = GRADIENTS[idx % GRADIENTS.length];
+    fb.innerHTML = '<div class="fb-icon">📷</div><div class="fb-label">MEMORY #' + pad2(idx+1) + '</div>';
+    wrap.appendChild(fb);
+  } else {
+    img.style.display = 'block';
+    img.style.opacity  = '0';
+    img.style.transition = 'none';
+    img.alt = 'Memory ' + (idx + 1);
+
+    img.onerror = function() {
+      preloadCache[idx] = 'err';
+      img.style.display = 'none';
+      if (!wrap.querySelector('.photo-fallback')) {
+        var fb = document.createElement('div');
+        fb.className = 'photo-fallback';
+        fb.style.background = GRADIENTS[idx % GRADIENTS.length];
+        fb.innerHTML = '<div class="fb-icon">📷</div><div class="fb-label">MEMORY #' + pad2(idx+1) + '</div>';
+        wrap.appendChild(fb);
+      }
+    };
+
+    img.onload = function() {
+      /* Small rAF delay so the browser has painted the invisible state first */
+      requestAnimationFrame(function() {
+        img.style.transition = 'opacity .22s ease';
+        img.style.opacity = '1';
+      });
+    };
+
+    img.src = src;
+
+    /* If browser already has it cached, onload won't fire */
+    if (img.complete && img.naturalWidth > 0) {
+      img.style.opacity = '1';
+    }
+  }
+
+  /* Reveal SURPRISE after reaching photo 10 */
   if (idx === 9 && !seenLast) {
     seenLast = true;
     setTimeout(function() {
@@ -1242,6 +1281,14 @@ function loadPhoto(idx) {
   }
 }
 
+function loadPhoto(idx) {
+  photoIdx = idx;
+  setPhotoContent(idx);
+  /* Pre-warm neighbours */
+  preloadImage(idx > 0 ? idx - 1 : 9);
+  preloadImage(idx < 9 ? idx + 1 : 0);
+}
+
 function navigateTo(idx) {
   if (transitioning || idx === photoIdx) return;
   doTransition(idx, idx > photoIdx ? 'r' : 'l');
@@ -1250,20 +1297,44 @@ function navigateTo(idx) {
 function navigate(dir) {
   if (transitioning) return;
   var next = photoIdx + (dir === 'r' ? 1 : -1);
-  if (next < 0)  next = 9;
-  if (next > 9)  next = 0;
+  if (next < 0) next = 9;
+  if (next > 9) next = 0;
   doTransition(next, dir);
 }
 
 function doTransition(nextIdx, dir) {
   transitioning = true;
   var card = el('photoCard');
-  card.classList.add(dir === 'r' ? 'exit-l' : 'exit-r');
-  setTimeout(function() {
-    card.classList.remove('exit-l', 'exit-r');
-    loadPhoto(nextIdx);
-    transitioning = false;
-  }, 380);
+
+  function runExit() {
+    /* Animate card out */
+    card.classList.add(dir === 'r' ? 'exit-l' : 'exit-r');
+    setTimeout(function() {
+      /* While card is invisible: swap content, then let card re-enter */
+      card.classList.remove('exit-l', 'exit-r');
+      photoIdx = nextIdx;
+      setPhotoContent(nextIdx);
+      /* Pre-warm next neighbours */
+      preloadImage(nextIdx > 0 ? nextIdx - 1 : 9);
+      preloadImage(nextIdx < 9 ? nextIdx + 1 : 0);
+      transitioning = false;
+    }, 340);
+  }
+
+  /* Wait for target image to be preloaded (max 400ms) before animating */
+  if (preloadCache[nextIdx]) {
+    runExit();
+  } else {
+    preloadImage(nextIdx);
+    var waited = 0;
+    var poll = setInterval(function() {
+      waited += 40;
+      if (preloadCache[nextIdx] || waited >= 400) {
+        clearInterval(poll);
+        runExit();
+      }
+    }, 40);
+  }
 }
 
 el('btnPrev').addEventListener('click', function() { navigate('l'); });
